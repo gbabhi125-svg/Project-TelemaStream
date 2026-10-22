@@ -1,0 +1,142 @@
+version: "3.8"
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: telemastream-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=redpanda:8082
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: telemastream-timescaledb
+    environment:
+      POSTGRES_USER: telemastream
+      POSTGRES_PASSWORD: telemastream
+      POSTGRES_DB: telemastream
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./infra/timescale/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemastream"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    container_name: telemastream-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: telemastream
+      MINIO_ROOT_PASSWORD: telemastream123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ingestion-service:
+    build: ./ingestion-service
+    container_name: telemastream-ingestion
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      TCP_LISTEN_ADDR: ":9500"
+      HTTP_LISTEN_ADDR: ":9501"
+      BUFFER_CAPACITY: "50000"
+      BUFFER_HIGH_WATERMARK: "0.85"
+      RATE_LIMIT_PER_SEC: "20000"
+    ports:
+      - "9500:9500"
+      - "9501:9501"
+
+  processing-engine:
+    build: ./processing-engine
+    container_name: telemastream-processing
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      TIMESCALE_DSN: "postgres://telemastream:telemastream@timescaledb:5432/telemastream?sslmode=disable"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: telemastream
+      MINIO_SECRET_KEY: telemastream123
+      MINIO_BUCKET: telemastream-cold
+      WINDOW_SIZE_SECONDS: "300"
+      WINDOW_SLIDE_SECONDS: "10"
+      MOISTURE_ALERT_THRESHOLD: "20"
+
+  backend-api:
+    build: ./backend-api
+    container_name: telemastream-backend
+    depends_on:
+      - timescaledb
+      - redpanda
+    environment:
+      PORT: "4000"
+      TIMESCALE_DSN: "postgres://telemastream:telemastream@timescaledb:5432/telemastream?sslmode=disable"
+      KAFKA_BROKERS: redpanda:9092
+      ALERTS_TOPIC: "sensor.alerts"
+    ports:
+      - "4000:4000"
+
+  frontend-dashboard:
+    build: ./frontend-dashboard
+    container_name: telemastream-frontend
+    depends_on:
+      - backend-api
+    environment:
+      NEXT_PUBLIC_WS_URL: "ws://localhost:4000/ws"
+      NEXT_PUBLIC_API_URL: "http://localhost:4000/api"
+    ports:
+      - "3000:3000"
+
+  simulator:
+    build: ./simulator
+    container_name: telemastream-simulator
+    depends_on:
+      - ingestion-service
+    environment:
+      INGEST_TCP_ADDR: "ingestion-service:9500"
+      VIRTUAL_SENSORS: "2000"
+      EMIT_INTERVAL_MS: "500"
+      SPIKE_MODE: "false"
+      FAULT_INJECTION_RATE: "0.01"
+
+volumes:
+  timescale-data:
+  minio-data:
