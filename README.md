@@ -8,6 +8,10 @@ a real-time Bento-UI dashboard.
 
 *Dashboard running in demo-data mode — this is exactly what ships to the deployed preview.*
 
+**Live demo:** https://telemastream-dashboard.vercel.app — deployed from `frontend-dashboard/`,
+running in client-side demo-data mode (no backend cluster attached). Point `NEXT_PUBLIC_WS_URL`
+at a real `backend-api` deployment to make it live.
+
 ## Why this exists
 
 Most student portfolio projects are CRUD apps. This one is a distributed systems project: it
